@@ -1,0 +1,7 @@
+.{
+    .name = .zigc,
+    .version = "0.0.0",
+    .fingerprint = 0x9cc7a2c9c46b0984, // Changing this has security and trust implications.
+    .minimum_zig_version = "0.15.2",
+    .paths = .{""},
+}
