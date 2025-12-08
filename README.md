@@ -441,9 +441,6 @@ It's **region-based memory management**, not garbage collection.
 ```bash
 # Run library tests
 zig build test
-
-# Run comprehensive stress tests (in repo)
-zig run test_comprehensive.zig
 ```
 
 ---
@@ -478,7 +475,7 @@ This is a personal project, but suggestions and PRs are welcome! Please:
 
 ## License
 
-MIT (or your preferred license)
+MIT
 
 ---
 
