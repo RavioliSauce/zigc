@@ -864,6 +864,7 @@ pub const Zigc = struct {
             } else {
                 stats.bytes_freed += (old_len - new_len);
             }
+            self.updateHighWater(.hot);
         }
         return result;
     }
@@ -931,6 +932,7 @@ pub const Zigc = struct {
             } else {
                 stats.bytes_freed += (old_len - new_len);
             }
+            self.updateHighWater(.warm);
         }
         return result;
     }
@@ -1000,6 +1002,7 @@ pub const Zigc = struct {
             } else {
                 stats.bytes_freed += (old_len - new_len);
             }
+            self.updateHighWater(.cold);
         }
         return result;
     }
