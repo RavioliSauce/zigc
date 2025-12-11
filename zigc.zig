@@ -254,18 +254,6 @@ pub const Zigc = struct {
     ///    - Memory corruption and hard-to-debug crashes
     ///    - Zig's safety features won't catch this
     ///
-    /// Safe pattern:
-    /// ```zig
-    /// list.clearRetainingCapacity(); // 1. Clear data structures first
-    /// zigc.reset(.warm, .retain_capacity); // 2. Then reset arena
-    /// ```
-    ///
-    /// Common mistake:
-    /// ```zig
-    /// zigc.reset(.warm, .retain_capacity);
-    /// const item = list.items[0]; // ❌ CRASH - accessing freed memory!
-    /// ```
-    ///
     /// Zone-specific behavior:
     /// - `.hot`: No-op, but panics in debug mode if there are outstanding allocations.
     /// - `.warm`: Frees all allocations, optionally retaining capacity.
