@@ -205,6 +205,46 @@ test "budgets work with resize" {
     try std.testing.expect(!can_resize); // Should fail
 }
 
+test "memory budgets enforced without debug" {
+    const limit = 1024; // 1KB limit
+    var zigc = Zigc.init(std.testing.allocator, .{
+        .debug = false,
+        .warm_limit = limit,
+    });
+    defer zigc.deinit();
+
+    const warm = zigc.allocator(.warm);
+
+    // Under budget
+    const a = try warm.alloc(u8, 800);
+    try std.testing.expect(a.len == 800);
+
+    // This would exceed limit (800 + 400 > 1024)
+    const result = warm.alloc(u8, 400);
+    try std.testing.expectError(error.OutOfMemory, result);
+
+    warm.reset();
+    // Budget should be available again
+    const b = try warm.alloc(u8, 1024);
+    try std.testing.expect(b.len == 1024);
+}
+
+test "stale allocators panic after deinit" {
+    if (!@hasDecl(std.testing, "expectPanic")) return; // Zig <=0.10 lacks expectPanic
+
+    var zigc = Zigc.init(std.testing.allocator, .{ .debug = true });
+    defer zigc.deinit();
+
+    const warm = zigc.allocator(.warm);
+    warm.deinit();
+
+    try std.testing.expectPanic("deinitialized", struct {
+        fn run() void {
+            _ = warm.alloc(u8, 1) catch unreachable;
+        }
+    }.run);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // High-Water Mark & Metrics Tests
 // ═══════════════════════════════════════════════════════════════════════════

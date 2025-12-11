@@ -152,6 +152,7 @@ pub const Zigc = struct {
     cold_arena: ArenaAllocator,
 
     stats: [3]ZoneStats = [_]ZoneStats{.{}} ** 3,
+    live_bytes: [3]usize = [_]usize{0} ** 3,
     high_water_marks: [3]usize = [_]usize{0} ** 3,
     reset_counts: [3]usize = [_]usize{0} ** 3,
     zone_limits: [3]usize = [_]usize{0} ** 3,
@@ -193,6 +194,7 @@ pub const Zigc = struct {
             .cold_arena = ArenaAllocator.init(backing),
             .debug = config.debug,
             .stats = [_]ZoneStats{.{}} ** 3,
+            .live_bytes = [_]usize{0} ** 3,
             .high_water_marks = [_]usize{0} ** 3,
             .reset_counts = [_]usize{0} ** 3,
             .zone_limits = [_]usize{0} ** 3,
@@ -740,6 +742,7 @@ pub const Zigc = struct {
 
     fn resetArena(self: *Zigc, zone: Zone, arena: *ArenaAllocator, mode: ResetMode) void {
         self.ensureZoneActive(zone);
+        const idx = zoneIndex(zone);
         if (self.debug) {
             self.markArenaCleared(zone);
         }
@@ -752,6 +755,7 @@ pub const Zigc = struct {
         if (mode == .release) {
             arena.* = ArenaAllocator.init(self.backing);
         }
+        self.live_bytes[idx] = 0;
     }
 
     fn deinitZone(self: *Zigc, zone: Zone) void {
@@ -767,6 +771,7 @@ pub const Zigc = struct {
         if (!self.zone_active[idx]) return;
         arena.deinit();
         self.zone_active[idx] = false;
+        self.live_bytes[idx] = 0;
         if (self.debug) {
             self.stats[idx] = .{};
         }
@@ -783,10 +788,10 @@ pub const Zigc = struct {
         const limit = self.zone_limits[@intFromEnum(zone)];
         if (limit == 0) return true; // Unlimited
 
-        const stats = self.stats[@intFromEnum(zone)];
-        const current = @as(usize, @intCast(@max(0, stats.netBytes())));
+        const current = self.live_bytes[@intFromEnum(zone)];
+        const new_total = std.math.add(usize, current, len) catch return false;
 
-        return current + len <= limit;
+        return new_total <= limit;
     }
 
     fn updateHighWater(self: *Zigc, zone: Zone) void {
@@ -829,10 +834,14 @@ pub const Zigc = struct {
     fn hotAlloc(ctx: *anyopaque, len: usize, ptr_align: Alignment, ret_addr: usize) ?[*]u8 {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
         const result = self.backing.rawAlloc(len, ptr_align, ret_addr);
-        if (result != null and self.debug) {
-            self.stats[@intFromEnum(Zone.hot)].allocs += 1;
-            self.stats[@intFromEnum(Zone.hot)].bytes_allocated += len;
-            self.updateHighWater(.hot);
+        if (result != null) {
+            const idx = @intFromEnum(Zone.hot);
+            self.live_bytes[idx] += len;
+            if (self.debug) {
+                self.stats[idx].allocs += 1;
+                self.stats[idx].bytes_allocated += len;
+                self.updateHighWater(.hot);
+            }
         }
         return result;
     }
@@ -841,14 +850,23 @@ pub const Zigc = struct {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
         const old_len = buf.len;
         const result = self.backing.rawResize(buf, buf_align, new_len, ret_addr);
-        if (result and self.debug) {
-            const stats = &self.stats[@intFromEnum(Zone.hot)];
+        if (result) {
+            const idx = @intFromEnum(Zone.hot);
             if (new_len > old_len) {
-                stats.bytes_allocated += (new_len - old_len);
+                self.live_bytes[idx] += (new_len - old_len);
             } else {
-                stats.bytes_freed += (old_len - new_len);
+                const delta = old_len - new_len;
+                self.live_bytes[idx] -= @min(self.live_bytes[idx], delta);
             }
-            self.updateHighWater(.hot);
+            if (self.debug) {
+                const stats = &self.stats[idx];
+                if (new_len > old_len) {
+                    stats.bytes_allocated += (new_len - old_len);
+                } else {
+                    stats.bytes_freed += (old_len - new_len);
+                }
+                self.updateHighWater(.hot);
+            }
         }
         return result;
     }
@@ -857,23 +875,34 @@ pub const Zigc = struct {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
         const old_len = buf.len;
         const result = self.backing.rawRemap(buf, buf_align, new_len, ret_addr);
-        if (result != null and self.debug) {
-            const stats = &self.stats[@intFromEnum(Zone.hot)];
+        if (result != null) {
+            const idx = @intFromEnum(Zone.hot);
             if (new_len > old_len) {
-                stats.bytes_allocated += (new_len - old_len);
+                self.live_bytes[idx] += (new_len - old_len);
             } else {
-                stats.bytes_freed += (old_len - new_len);
+                const delta = old_len - new_len;
+                self.live_bytes[idx] -= @min(self.live_bytes[idx], delta);
             }
-            self.updateHighWater(.hot);
+            if (self.debug) {
+                const stats = &self.stats[idx];
+                if (new_len > old_len) {
+                    stats.bytes_allocated += (new_len - old_len);
+                } else {
+                    stats.bytes_freed += (old_len - new_len);
+                }
+                self.updateHighWater(.hot);
+            }
         }
         return result;
     }
 
     fn hotFree(ctx: *anyopaque, buf: []u8, buf_align: Alignment, ret_addr: usize) void {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        const idx = @intFromEnum(Zone.hot);
+        self.live_bytes[idx] -= @min(self.live_bytes[idx], buf.len);
         if (self.debug) {
-            self.stats[@intFromEnum(Zone.hot)].frees += 1;
-            self.stats[@intFromEnum(Zone.hot)].bytes_freed += buf.len;
+            self.stats[idx].frees += 1;
+            self.stats[idx].bytes_freed += buf.len;
         }
         self.backing.rawFree(buf, buf_align, ret_addr);
     }
@@ -882,6 +911,7 @@ pub const Zigc = struct {
 
     fn warmAlloc(ctx: *anyopaque, len: usize, ptr_align: Alignment, ret_addr: usize) ?[*]u8 {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.warm);
 
         // Check budget before allocating
         if (!self.checkBudget(.warm, len)) {
@@ -889,16 +919,21 @@ pub const Zigc = struct {
         }
 
         const result = self.warm_arena.allocator().rawAlloc(len, ptr_align, ret_addr);
-        if (result != null and self.debug) {
-            self.stats[@intFromEnum(Zone.warm)].allocs += 1;
-            self.stats[@intFromEnum(Zone.warm)].bytes_allocated += len;
-            self.updateHighWater(.warm);
+        if (result != null) {
+            const idx = @intFromEnum(Zone.warm);
+            self.live_bytes[idx] += len;
+            if (self.debug) {
+                self.stats[idx].allocs += 1;
+                self.stats[idx].bytes_allocated += len;
+                self.updateHighWater(.warm);
+            }
         }
         return result;
     }
 
     fn warmResize(ctx: *anyopaque, buf: []u8, buf_align: Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.warm);
         const old_len = buf.len;
 
         // Check budget if growing
@@ -909,39 +944,61 @@ pub const Zigc = struct {
         }
 
         const result = self.warm_arena.allocator().rawResize(buf, buf_align, new_len, ret_addr);
-        if (result and self.debug) {
-            const stats = &self.stats[@intFromEnum(Zone.warm)];
+        if (result) {
+            const idx = @intFromEnum(Zone.warm);
             if (new_len > old_len) {
-                stats.bytes_allocated += (new_len - old_len);
+                self.live_bytes[idx] += (new_len - old_len);
             } else {
-                stats.bytes_freed += (old_len - new_len);
+                const delta = old_len - new_len;
+                self.live_bytes[idx] -= @min(self.live_bytes[idx], delta);
             }
-            self.updateHighWater(.warm);
+            if (self.debug) {
+                const stats = &self.stats[idx];
+                if (new_len > old_len) {
+                    stats.bytes_allocated += (new_len - old_len);
+                } else {
+                    stats.bytes_freed += (old_len - new_len);
+                }
+                self.updateHighWater(.warm);
+            }
         }
         return result;
     }
 
     fn warmRemap(ctx: *anyopaque, buf: []u8, buf_align: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.warm);
         const old_len = buf.len;
         const result = self.warm_arena.allocator().rawRemap(buf, buf_align, new_len, ret_addr);
-        if (result != null and self.debug) {
-            const stats = &self.stats[@intFromEnum(Zone.warm)];
+        if (result != null) {
+            const idx = @intFromEnum(Zone.warm);
             if (new_len > old_len) {
-                stats.bytes_allocated += (new_len - old_len);
+                self.live_bytes[idx] += (new_len - old_len);
             } else {
-                stats.bytes_freed += (old_len - new_len);
+                const delta = old_len - new_len;
+                self.live_bytes[idx] -= @min(self.live_bytes[idx], delta);
             }
-            self.updateHighWater(.warm);
+            if (self.debug) {
+                const stats = &self.stats[idx];
+                if (new_len > old_len) {
+                    stats.bytes_allocated += (new_len - old_len);
+                } else {
+                    stats.bytes_freed += (old_len - new_len);
+                }
+                self.updateHighWater(.warm);
+            }
         }
         return result;
     }
 
     fn warmFree(ctx: *anyopaque, buf: []u8, buf_align: Alignment, ret_addr: usize) void {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.warm);
+        const idx = @intFromEnum(Zone.warm);
+        self.live_bytes[idx] -= @min(self.live_bytes[idx], buf.len);
         if (self.debug) {
-            self.stats[@intFromEnum(Zone.warm)].frees += 1;
-            self.stats[@intFromEnum(Zone.warm)].bytes_freed += buf.len;
+            self.stats[idx].frees += 1;
+            self.stats[idx].bytes_freed += buf.len;
         }
         // Arena doesn't actually free individual allocations, but we still
         // call through for consistency (it's a no-op).
@@ -952,6 +1009,7 @@ pub const Zigc = struct {
 
     fn coldAlloc(ctx: *anyopaque, len: usize, ptr_align: Alignment, ret_addr: usize) ?[*]u8 {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.cold);
 
         // Check budget before allocating
         if (!self.checkBudget(.cold, len)) {
@@ -959,16 +1017,21 @@ pub const Zigc = struct {
         }
 
         const result = self.cold_arena.allocator().rawAlloc(len, ptr_align, ret_addr);
-        if (result != null and self.debug) {
-            self.stats[@intFromEnum(Zone.cold)].allocs += 1;
-            self.stats[@intFromEnum(Zone.cold)].bytes_allocated += len;
-            self.updateHighWater(.cold);
+        if (result != null) {
+            const idx = @intFromEnum(Zone.cold);
+            self.live_bytes[idx] += len;
+            if (self.debug) {
+                self.stats[idx].allocs += 1;
+                self.stats[idx].bytes_allocated += len;
+                self.updateHighWater(.cold);
+            }
         }
         return result;
     }
 
     fn coldResize(ctx: *anyopaque, buf: []u8, buf_align: Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.cold);
         const old_len = buf.len;
 
         // Check budget if growing
@@ -979,39 +1042,61 @@ pub const Zigc = struct {
         }
 
         const result = self.cold_arena.allocator().rawResize(buf, buf_align, new_len, ret_addr);
-        if (result and self.debug) {
-            const stats = &self.stats[@intFromEnum(Zone.cold)];
+        if (result) {
+            const idx = @intFromEnum(Zone.cold);
             if (new_len > old_len) {
-                stats.bytes_allocated += (new_len - old_len);
+                self.live_bytes[idx] += (new_len - old_len);
             } else {
-                stats.bytes_freed += (old_len - new_len);
+                const delta = old_len - new_len;
+                self.live_bytes[idx] -= @min(self.live_bytes[idx], delta);
             }
-            self.updateHighWater(.cold);
+            if (self.debug) {
+                const stats = &self.stats[idx];
+                if (new_len > old_len) {
+                    stats.bytes_allocated += (new_len - old_len);
+                } else {
+                    stats.bytes_freed += (old_len - new_len);
+                }
+                self.updateHighWater(.cold);
+            }
         }
         return result;
     }
 
     fn coldRemap(ctx: *anyopaque, buf: []u8, buf_align: Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.cold);
         const old_len = buf.len;
         const result = self.cold_arena.allocator().rawRemap(buf, buf_align, new_len, ret_addr);
-        if (result != null and self.debug) {
-            const stats = &self.stats[@intFromEnum(Zone.cold)];
+        if (result != null) {
+            const idx = @intFromEnum(Zone.cold);
             if (new_len > old_len) {
-                stats.bytes_allocated += (new_len - old_len);
+                self.live_bytes[idx] += (new_len - old_len);
             } else {
-                stats.bytes_freed += (old_len - new_len);
+                const delta = old_len - new_len;
+                self.live_bytes[idx] -= @min(self.live_bytes[idx], delta);
             }
-            self.updateHighWater(.cold);
+            if (self.debug) {
+                const stats = &self.stats[idx];
+                if (new_len > old_len) {
+                    stats.bytes_allocated += (new_len - old_len);
+                } else {
+                    stats.bytes_freed += (old_len - new_len);
+                }
+                self.updateHighWater(.cold);
+            }
         }
         return result;
     }
 
     fn coldFree(ctx: *anyopaque, buf: []u8, buf_align: Alignment, ret_addr: usize) void {
         const self: *Zigc = @ptrCast(@alignCast(ctx));
+        self.ensureZoneActive(.cold);
+        const idx = @intFromEnum(Zone.cold);
+        self.live_bytes[idx] -= @min(self.live_bytes[idx], buf.len);
         if (self.debug) {
-            self.stats[@intFromEnum(Zone.cold)].frees += 1;
-            self.stats[@intFromEnum(Zone.cold)].bytes_freed += buf.len;
+            self.stats[idx].frees += 1;
+            self.stats[idx].bytes_freed += buf.len;
         }
         self.cold_arena.allocator().rawFree(buf, buf_align, ret_addr);
     }
