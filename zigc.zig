@@ -248,6 +248,24 @@ pub const Zigc = struct {
     /// Default behavior is `.retain_capacity` for performance.
     /// Use `reset(zone, .release)` to actually free memory to backing allocator.
     ///
+    /// ⚠️  WARNING: You must clear/deinit all data structures using this zone
+    ///    BEFORE calling reset(), otherwise:
+    ///    - Accessing those structures = undefined behavior (likely segfault)
+    ///    - Memory corruption and hard-to-debug crashes
+    ///    - Zig's safety features won't catch this
+    ///
+    /// Safe pattern:
+    /// ```zig
+    /// list.clearRetainingCapacity(); // 1. Clear data structures first
+    /// zigc.reset(.warm, .retain_capacity); // 2. Then reset arena
+    /// ```
+    ///
+    /// Common mistake:
+    /// ```zig
+    /// zigc.reset(.warm, .retain_capacity);
+    /// const item = list.items[0]; // ❌ CRASH - accessing freed memory!
+    /// ```
+    ///
     /// Zone-specific behavior:
     /// - `.hot`: No-op, but panics in debug mode if there are outstanding allocations.
     /// - `.warm`: Frees all allocations, optionally retaining capacity.
@@ -403,6 +421,9 @@ pub const Zigc = struct {
 
         /// Reset this zone, freeing all allocations.
         ///
+        /// ⚠️  WARNING: You must clear/deinit all data structures using this zone
+        ///    BEFORE calling reset(), otherwise you'll access freed memory.
+        ///
         /// Default mode is `.retain_capacity` (fast, keeps memory allocated).
         /// For warm/cold zones, this frees all allocations in the arena.
         /// For hot zone, this is a no-op but panics if allocations are unbalanced.
@@ -417,6 +438,9 @@ pub const Zigc = struct {
         }
 
         /// Reset this zone with explicit mode control.
+        ///
+        /// ⚠️  WARNING: You must clear/deinit all data structures using this zone
+        ///    BEFORE calling reset(), otherwise you'll access freed memory.
         ///
         /// Modes:
         /// - `.retain_capacity`: Fast, keeps allocated memory (default via reset())
